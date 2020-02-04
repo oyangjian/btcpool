@@ -58,10 +58,12 @@ private:
   void handleRequest_Submit(
       const std::string &idStr,
       uint8_t shortJobId,
+      uint32_t extraNonce1,
       uint64_t extraNonce2,
       BitcoinNonceType nonce,
       uint32_t nTime,
-      uint32_t versionMask);
+      uint32_t versionMask,
+      uint64_t submitDiff);
 };
 
 #endif // #ifndef STRATUM_MINER_BITCOIN_H_

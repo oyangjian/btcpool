@@ -97,6 +97,9 @@ void StratumMinerBitcoin::handleRequest_Submit(
     shortJobId = (uint8_t)jparams.children()->at(1).uint32();
   }
 
+  uint32_t extraNonce1 = session.getSessionId();
+  uint64_t submitDiff = 0;
+
 #ifdef CHAIN_TYPE_ZEC
   BitcoinNonceType nonce;
 
@@ -131,6 +134,8 @@ void StratumMinerBitcoin::handleRequest_Submit(
   //  params[3] = nTime
   //  params[4] = nonce
   //  params[5] = version mask (optional)
+  //  params[6] = nonce1 4bytes (optional, yang)
+  //  params[7] = curr diff (optional, yang)
   const uint64_t extraNonce2 = jparams.children()->at(2).uint64_hex();
   uint32_t nTime = jparams.children()->at(3).uint32_hex();
   BitcoinNonceType nonce = jparams.children()->at(4).uint32_hex();
@@ -138,10 +143,16 @@ void StratumMinerBitcoin::handleRequest_Submit(
   if (jparams.children()->size() >= 6) {
     versionMask = jparams.children()->at(5).uint32_hex();
   }
+  if (jparams.children()->size() >= 7) {
+    extraNonce1 = jparams.children()->at(6).uint32_hex();
+  }
+  if (jparams.children()->size() >= 8) {
+    submitDiff = jparams.children()->at(7).uint64_hex();
+  }
 #endif
 
   handleRequest_Submit(
-      idStr, shortJobId, extraNonce2, nonce, nTime, versionMask);
+      idStr, shortJobId, extraNonce1, extraNonce2, nonce, nTime, versionMask, submitDiff);
 }
 
 void StratumMinerBitcoin::handleExMessage_SubmitShare(
@@ -195,17 +206,19 @@ void StratumMinerBitcoin::handleExMessage_SubmitShare(
       versionMask);
 
   handleRequest_Submit(
-      "null", shortJobId, fullExtraNonce2, nonce, timestamp, versionMask);
+      "null", shortJobId, getSession().getSessionId(), fullExtraNonce2, nonce, timestamp, versionMask, 0);
 #endif
 }
 
 void StratumMinerBitcoin::handleRequest_Submit(
     const string &idStr,
     uint8_t shortJobId,
+    uint32_t extraNonce1,
     uint64_t extraNonce2,
     BitcoinNonceType nonce,
     uint32_t nTime,
-    uint32_t versionMask) {
+    uint32_t versionMask,
+    uint64_t submitDiff) {
   auto &session = getSession();
   auto &server = session.getServer();
   auto &worker = session.getWorker();
@@ -267,13 +280,16 @@ void StratumMinerBitcoin::handleRequest_Submit(
     LOG(ERROR) << "can't find session's diff, worker: " << worker.fullName_;
     return;
   }
+  if (submitDiff == 0) {
+    submitDiff = iter->second;
+  }
 
   ShareBitcoin share;
   share.set_version(ShareBitcoin::CURRENT_VERSION);
   share.set_jobid(localJob->jobId_);
   share.set_workerhashid(workerId_);
   share.set_userid(worker.userId(localJob->chainId_));
-  share.set_sharediff(iter->second);
+  share.set_sharediff(submitDiff);
   share.set_blkbits(localJob->blkBits_);
   share.set_timestamp((uint64_t)time(nullptr));
   share.set_height(sjobBitcoin->height_);
@@ -320,7 +336,7 @@ void StratumMinerBitcoin::handleRequest_Submit(
     server.checkShare(
         localJob->chainId_,
         share,
-        session.getSessionId(),
+        extraNonce1,
         extraNonce2Hex,
         nTime,
         nonce,
