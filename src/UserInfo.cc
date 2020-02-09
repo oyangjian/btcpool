@@ -75,6 +75,7 @@ UserInfo::UserInfo(StratumServer *server, const libconfig::Config &config)
         std::make_unique<std::shared_timed_mutex>(), // rwlock_
         {}, // nameIds_
         0, // lastMaxUserId_
+        0, // lastTime_
         {} // threadUpdate_
     });
   };
@@ -90,6 +91,7 @@ UserInfo::UserInfo(StratumServer *server, const libconfig::Config &config)
     if (chains_.empty()) {
       LOG(FATAL) << "sserver.multi_chains enabled but chains is empty!";
     }
+#ifndef USE_API_SWTICH_MULTICHAIN
     if (chains_.size() > 1) {
       if (!zk_) {
         zk_ = server->getZookeeper(config);
@@ -104,15 +106,28 @@ UserInfo::UserInfo(StratumServer *server, const libconfig::Config &config)
       }
       setZkReconnectHandle();
     }
+#endif
   } else {
     // required (exception will be threw if inexists)
     addChainVars(config.lookup("users.list_id_api_url"));
   }
+  mainChain_ = {
+        config.lookup("users.list_id_api_url"),
+        std::make_unique<std::shared_timed_mutex>(), // rwlock_
+        {}, // nameIds_
+        0, // lastMaxUserId_
+        0, // lastTime_
+        {} // threadUpdate_
+    };
 }
 
 UserInfo::~UserInfo() {
   stop();
 
+#ifdef USE_API_SWTICH_MULTICHAIN
+  if (mainChain_.threadUpdate_.joinable())
+    mainChain_.threadUpdate_.join();
+#else
   for (ChainVars &chain : chains_) {
     if (chain.threadUpdate_.joinable())
       chain.threadUpdate_.join();
@@ -121,6 +136,7 @@ UserInfo::~UserInfo() {
   if (nameChainsCheckingThread_.joinable()) {
     nameChainsCheckingThread_.join();
   }
+#endif
 }
 
 void UserInfo::stop() {
@@ -351,7 +367,81 @@ void UserInfo::autoSwitchChain(
   });
 }
 
+//// new api
+void UserInfo::handleSwitchChainEvent(const string &userName, const int32_t userId, const size_t currentChainId, const size_t newChainId) {
+  if (currentChainId == newChainId) {
+    LOG(INFO) << "Ignore empty switching request for user '" << userName
+              << "': " << server_->chainName(currentChainId) << " -> "
+              << server_->chainName(newChainId);
+    return;
+  }
+
+  if (userId <= 0) {
+    LOG(INFO) << "Ignore switching request: cannot find user id, chainId: "
+              << newChainId << ", userName: " << userName;
+    return;
+  }
+
+  server_->dispatch([this, userName, currentChainId, newChainId]() {
+    size_t onlineSessions = server_->switchChain(userName, newChainId);
+
+    if (onlineSessions == 0) {
+      LOG(INFO) << "No workers of user " << userName
+                << " online, subsequent switching request will be ignored";
+      // clear cache
+      std::unique_lock<std::shared_timed_mutex> l{nameChainlock_};
+      auto itr = nameChains_.find(userName);
+      if (itr != nameChains_.end()) {
+        nameChains_.erase(itr);
+      }
+    }
+
+    LOG(INFO) << "User '" << userName << "' (" << onlineSessions
+              << " miners) switched chain: "
+              << server_->chainName(currentChainId) << " -> "
+              << server_->chainName(newChainId);
+  });
+}
+
+bool UserInfo::getChainIdByName_ApiSwitch(const string &chainName, size_t &chainId) {
+  if (server_->chains_.size() == 1) {
+    chainId = 0;
+    return true;
+  }
+  for (size_t cId = 0; cId < server_->chains_.size(); cId++) {
+    if (chainName == server_->chainName(cId)) {
+      chainId = cId;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool UserInfo::getChainId_ApiSwitch(const string &userName, size_t &chainId) {
+  if (server_->chains_.size() == 1) {
+    chainId = 0;
+    return true;
+  }
+
+  {
+    // lookup name -> chain cache map
+    std::shared_lock<std::shared_timed_mutex> l{nameChainlock_};
+    auto itr = nameChains_.find(userName);
+    if (itr != nameChains_.end()) {
+      chainId = itr->second.chainId_;
+      return true;
+    }
+  }
+
+  // Not found in all chains
+  return false;
+}
+
 bool UserInfo::getChainId(const string &userName, size_t &chainId) {
+#ifdef USE_API_SWTICH_MULTICHAIN
+  // use new version.
+  return getChainId_ApiSwitch(userName, chainId);
+#endif
   if (chains_.size() == 1) {
     chainId = 0;
     return true;
@@ -393,7 +483,11 @@ bool UserInfo::getChainId(const string &userName, size_t &chainId) {
 }
 
 int32_t UserInfo::getUserId(size_t chainId, const string &userName) {
+#ifdef USE_API_SWTICH_MULTICHAIN
+  ChainVars &chain = mainChain_;
+#else
   ChainVars &chain = chains_[chainId];
+#endif
 
   std::shared_lock<std::shared_timed_mutex> l{*chain.nameIdlock_};
   auto itr = chain.nameIds_.find(userName);
@@ -451,6 +545,103 @@ int32_t UserInfo::incrementalUpdateUsers(size_t chainId) {
   return vUser->size();
 }
 
+// new version for update users via http api.
+int32_t UserInfo::incrementalUpdateUsers_ApiSwitch(size_t chainId) {
+  ChainVars &chain = mainChain_;
+
+  //
+  // WARNING: The API is incremental update, we use `?last_id=*&last_time=*` to
+  // make sure
+  //          always get the new data. Make sure you have use `last_id` and
+  //          `last_time` in API.
+  //
+  const string url = Strings::Format(
+      "%s?algo=sha256d&last_id=%d&last_time=%d",
+      chain.apiUrl_,
+      chain.lastMaxUserId_,
+      chain.lastTime_);
+  string resp;
+  if (!httpGET(url.c_str(), resp, 10000 /* timeout ms */)) {
+    LOG(ERROR) << "http get request user list fail, url: " << url;
+    return -1;
+  }
+
+  JsonNode r;
+  if (!JsonNode::parse(resp.c_str(), resp.c_str() + resp.length(), r)) {
+    LOG(ERROR) << "decode json fail, json: " << resp;
+    return -1;
+  }
+  if (r["data"].type() == Utilities::JS::type::Undefined) {
+    LOG(ERROR) << "invalid data, should key->value, type: "
+               << (int)r["data"].type();
+    return -1;
+  }
+
+  auto vUser = r["data"].children();
+  if (vUser->size() == 0) {
+    return 0;
+  }
+  chain.lastTime_ = r["time"].int64();
+
+  if (chain.lastTime_ == 0) {
+    // old version json.
+    std::unique_lock<std::shared_timed_mutex> l{*chain.nameIdlock_};
+    for (const auto &itr : *vUser) {
+      string userName = itr.key();
+      regularUserName(userName);
+
+      const int32_t userId = itr.int32();
+      if (userId > chain.lastMaxUserId_) {
+        chain.lastMaxUserId_ = userId;
+      }
+
+      chain.nameIds_.insert(std::make_pair(userName, userId));
+    }
+    return vUser->size();
+  }
+
+  std::unique_lock<std::shared_timed_mutex> l{*chain.nameIdlock_};
+  for (JsonNode &itr : *vUser) {
+
+    string userName = itr.key();
+    regularUserName(userName);
+
+    if (itr.type() != Utilities::JS::type::Obj) {
+      LOG(ERROR) << "invalid data, should key  - value" << std::endl;
+      return -1;
+    }
+
+    const int32_t userId = itr["puid"].int32();
+    string chainName = itr["chain"].str();
+
+    if (userId > chain.lastMaxUserId_) {
+      chain.lastMaxUserId_ = userId;
+    }
+    chain.nameIds_.insert(std::make_pair(userName, userId));
+
+    size_t currChainId;
+    size_t newChainId;
+    if (!getChainIdByName_ApiSwitch(chainName, newChainId))
+      continue;
+
+    if (getChainId_ApiSwitch(userName, currChainId)) {
+      // exists chainid, means switch chain.
+      if (currChainId != newChainId) {
+        std::unique_lock<std::shared_timed_mutex> l{nameChainlock_};
+        nameChains_[userName] = {newChainId, false};
+        handleSwitchChainEvent(userName, userId, currChainId, newChainId);
+        LOG(INFO) << "update user id: " << userId << ", user name: " << userName << ", chain name: " << chainName << ", chain id: " << newChainId;
+      }
+    } else {
+        std::unique_lock<std::shared_timed_mutex> l{nameChainlock_};
+        nameChains_[userName] = {newChainId, false};
+        LOG(INFO) << "insert user id: " << userId << ", user name: " << userName << ", chain name: " << chainName << ", chain id: " << newChainId << " map size: " << nameChains_.size();
+    }
+  }
+
+  return vUser->size();
+}
+
 void UserInfo::runThreadUpdate(size_t chainId) {
   //
   // get all user list, incremental update model.
@@ -469,17 +660,30 @@ void UserInfo::runThreadUpdate(size_t chainId) {
       continue;
     }
 
+#ifdef USE_API_SWTICH_MULTICHAIN
+    int32_t res = incrementalUpdateUsers_ApiSwitch(chainId);
+#else
     int32_t res = incrementalUpdateUsers(chainId);
+#endif
     lastUpdateTime = time(nullptr);
 
     if (res > 0) {
+#ifdef USE_API_SWTICH_MULTICHAIN
+      LOG(INFO) << "chain default multichain update users count: " << res;
+#else
       LOG(INFO) << "chain " << server_->chainName(chainId)
                 << " update users count: " << res;
+#endif
     }
   }
 }
 
 bool UserInfo::setupThreads() {
+#ifdef USE_API_SWTICH_MULTICHAIN
+  ChainVars &chain = mainChain_;
+
+  chain.threadUpdate_ = std::thread(&UserInfo::runThreadUpdate, this, 0);
+#else
   for (size_t chainId = 0; chainId < chains_.size(); chainId++) {
     ChainVars &chain = chains_[chainId];
 
@@ -491,6 +695,7 @@ bool UserInfo::setupThreads() {
     nameChainsCheckingThread_ =
         std::thread(std::bind(&UserInfo::checkNameChains, this));
   }
+#endif
 
   return true;
 }

@@ -33,6 +33,9 @@
 
 class StratumServer;
 
+// user http api to control switch chain
+#define USE_API_SWTICH_MULTICHAIN 1
+
 ///////////////////////////////////// UserInfo /////////////////////////////////
 // 1. update userName->userId by interval
 // 2. insert worker name to db
@@ -56,6 +59,8 @@ class UserInfo {
     // username -> userId
     std::unordered_map<string, int32_t> nameIds_;
     int32_t lastMaxUserId_ = 0;
+    // chainId/userId update time via http api
+    int64_t lastTime_;
 
     thread threadUpdate_;
   };
@@ -75,6 +80,7 @@ class UserInfo {
   string userSuffixSeparator_;
 
   vector<ChainVars> chains_;
+  ChainVars mainChain_;
   StratumServer *server_;
 
   shared_ptr<Zookeeper> zk_;
@@ -98,6 +104,12 @@ class UserInfo {
   int32_t incrementalUpdateUsers(size_t chainId);
   void checkNameChains();
   bool /*isInterrupted*/ interruptibleSleep(time_t seconds);
+
+  /** new version */
+  int32_t incrementalUpdateUsers_ApiSwitch(size_t chainId);
+  void handleSwitchChainEvent(const string &userName, const int32_t userId, const size_t currChainId, const size_t newChainId);
+  bool getChainId_ApiSwitch(const string &userName, size_t &chainId);
+  bool getChainIdByName_ApiSwitch(const string &chainName, size_t &chainId);
 
   bool getChainIdFromZookeeper(const string &userName, size_t &chainId);
   void setZkReconnectHandle();
