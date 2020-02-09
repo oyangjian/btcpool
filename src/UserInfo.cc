@@ -91,6 +91,7 @@ UserInfo::UserInfo(StratumServer *server, const libconfig::Config &config)
     if (chains_.empty()) {
       LOG(FATAL) << "sserver.multi_chains enabled but chains is empty!";
     }
+    algo_ = config.lookup("sserver.algo").c_str();
 #ifndef USE_API_SWTICH_MULTICHAIN
     if (chains_.size() > 1) {
       if (!zk_) {
@@ -556,8 +557,9 @@ int32_t UserInfo::incrementalUpdateUsers_ApiSwitch(size_t chainId) {
   //          `last_time` in API.
   //
   const string url = Strings::Format(
-      "%s?algo=sha256d&last_id=%d&last_time=%d",
+      "%s?algo=%s&last_id=%d&last_time=%d",
       chain.apiUrl_,
+      algo_,
       chain.lastMaxUserId_,
       chain.lastTime_);
   string resp;

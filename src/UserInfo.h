@@ -81,6 +81,7 @@ class UserInfo {
 
   vector<ChainVars> chains_;
   ChainVars mainChain_;
+  string algo_;
   StratumServer *server_;
 
   shared_ptr<Zookeeper> zk_;
