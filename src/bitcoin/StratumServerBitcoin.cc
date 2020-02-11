@@ -729,7 +729,7 @@ void ServerBitcoin::checkShare(
                << ", networkTarget: " << sjob->networkTarget_.ToString();
 
     // check share diff
-    if (StratumStatus::UNKNOWN == shareStatusReturn &&
+    if ((StratumStatus::UNKNOWN == shareStatusReturn || StratumStatus::STALE_SHARE == shareStatusReturn) &&
         isEnableSimulator_ == false &&
         bnBlockHash > UintToArith256(jobTarget)) {
       shareStatusReturn = StratumStatus::LOW_DIFFICULTY;
@@ -738,6 +738,9 @@ void ServerBitcoin::checkShare(
     // reach here and shareStatusReturn is initvalue means an valid share
     if (StratumStatus::UNKNOWN == shareStatusReturn)
       shareStatusReturn = StratumStatus::ACCEPT;
+    else if (StratumStatus::STALE_SHARE == shareStatusReturn)
+      // accept the stale share. rpc json return success, and record stale share to db
+      shareStatusReturn = StratumStatus::ACCEPT_STALE;
 
     dispatch(
         [shareStatusReturn, bitsReached, returnFn = std::move(returnFn)]() {
