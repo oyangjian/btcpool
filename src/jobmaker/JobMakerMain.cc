@@ -41,6 +41,7 @@
 #include "JobMaker.h"
 #include "Zookeeper.h"
 
+#include "bitcoin/BitcoinUtils.h"
 #include "bitcoin/JobMakerBitcoin.h"
 #include "eth/JobMakerEth.h"
 #include "bytom/JobMakerBytom.h"
@@ -164,6 +165,53 @@ createGbtJobMakerDefinition(const Setting &setting) {
   readFromSetting(setting, "coinbase_info", def->coinbaseInfo_);
   readFromSetting(setting, "block_version", def->blockVersion_);
 
+  // Share jobs with the main pool, but with different coinbase information and
+  // addresses.
+  if (setting.exists("subpool")) {
+    const auto &subpool = setting["subpool"];
+    bool subPoolEnabled = false;
+    subpool.lookupValue("enabled", subPoolEnabled);
+
+    if (subPoolEnabled) {
+      subpool.lookupValue("coinbase_info_max_len", def->subPoolCoinbaseMaxLen_);
+      if (def->subPoolCoinbaseMaxLen_ < 1) {
+        def->subPoolCoinbaseMaxLen_ = 30;
+      }
+
+      // select chain
+      if (def->testnet_) {
+        SelectParams(CBaseChainParams::TESTNET);
+        LOG(WARNING) << "[subpool] using bitcoin testnet3";
+      } else {
+        SelectParams(CBaseChainParams::MAIN);
+      }
+
+      const auto &pools = subpool.lookup("pools");
+      for (int i = 0; i < pools.getLength(); i++) {
+        const auto &pool = pools[i];
+
+        SubPoolInfo info;
+
+        pool.lookupValue("zk_update_path", info.zkUpdatePath_); // optional
+
+        info.name_ = pool.lookup("name").operator string();
+        info.coinbaseInfo_ = pool.lookup("coinbase_info").operator string();
+
+        string payoutAddr = pool.lookup("payout_address").operator string();
+        if (!BitcoinUtils::IsValidDestinationString(payoutAddr)) {
+          LOG(FATAL) << "[subpool " << info.name_
+                     << "] invalid pool payout address";
+        } else {
+          LOG(INFO) << "[subpool " << info.name_
+                    << "] Payout Address: " << payoutAddr;
+        }
+        info.payoutAddr_ = BitcoinUtils::DecodeDestination(payoutAddr);
+
+        def->subPool_.emplace_back(std::move(info));
+      }
+    }
+  }
+
   readFromSetting(setting, "rawgbt_topic", def->rawGbtTopic_);
   readFromSetting(setting, "auxpow_gw_topic", def->auxPowGwTopic_);
   readFromSetting(setting, "rsk_rawgw_topic", def->rskRawGwTopic_);
@@ -202,6 +250,9 @@ createGbtJobMakerDefinition(const Setting &setting) {
 
   def->enabled_ = false;
   readFromSetting(setting, "enabled", def->enabled_, true);
+
+  def->grandPoolEnabled_ = false;
+  readFromSetting(setting, "grandPoolEnabled", def->grandPoolEnabled_, true);
 
   return def;
 }
@@ -246,8 +297,10 @@ void createJobMakers(
                 << ", enabled.";
 
       auto handle = createGbtJobMakerHandler(def);
-      makers.push_back(
-          std::make_shared<JobMaker>(handle, kafkaBrokers, zkBrokers));
+      auto jobmaker =
+          std::make_shared<JobMaker>(handle, kafkaBrokers, zkBrokers);
+      handle->setParent(jobmaker);
+      makers.push_back(jobmaker);
     }
   }
 }

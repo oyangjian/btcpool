@@ -86,7 +86,11 @@ sserver = {
 
   # Send ShareBitcoinBytesV1 to share_topic to keep compatibility with legacy statshttpd/sharelogger.
   use_share_v1 = <?=optionalBool('sserver_use_share_v1', false)?>;
-  
+
+  # Accepting the PROXY Protocol to get the original IP of the miner from a proxy.
+  # <https://docs.nginx.com/nginx/admin-guide/load-balancer/using-proxy-protocol/>
+  proxy_protocol = <?=optionalBool('sserver_proxy_protocol', false)?>;
+
 <?php
   $chains = commaSplitTrim('chains');
   $multi_chains = !empty($chains);
@@ -153,11 +157,21 @@ users = {
   auto_reg_max_pending_users = <?=optionalTrim('users_auto_reg_max_pending_users', '50')?>;
   zookeeper_auto_reg_watch_dir = "<?=mayOptionalTrim(!$users_enable_auto_reg, 'users_zookeeper_auto_reg_watch_dir')?>";
 
+  # Use a single user-selected chain.
+  #
+  # If true, this sserver will use single_user_name as the reference user for chain switching,
+  # ignoring the sub-accounts that are actually authenticated. It takes effect even if
+  # single-user mode is not enabled.
+  #
+  # If false, the chain specified by the sub-account actually authenticated is selected.
+  # 
+  single_user_chain = <?=optionalBool('users_single_user_chain', false, $users_single_user_chain)?>;
+
   # Enable single user mode.
   # In this mode, all sub-accounts connected to the sserver will become the worker name prefix for a specified user.
   # Example, a worker "user2.11x20" will become "user1.user2.11x20".
   single_user_mode = <?=optionalBool('users_single_user_mode', false, $users_single_user_mode)?>;
-  single_user_name = "<?=mayOptionalTrim(!$users_single_user_mode, "users_single_user_name")?>";
+  single_user_name = "<?=mayOptionalTrim(!$users_single_user_mode && !$users_single_user_chain, "users_single_user_name")?>";
   single_user_puid = <?=mayOptionalTrim(!$users_single_user_mode || $multi_chains, "users_single_user_puid", '0')?>;
 };
 
@@ -210,4 +224,11 @@ management = {
   processor_topic = "<?=mayOptionalTrim(!$management_enabled, "management_processor_topic")?>";
 
   auto_switch_chain = <?=optionalBool('management_auto_switch_chain', true)?>;
+};
+
+# Share jobs with the main pool, but with different coinbase information and addresses.
+subpool = {
+  enabled = <?=optionalBool('subpool_enabled', false)?>; # default: false
+  name = "<?=optionalTrim('subpool_name', '')?>";
+  ext_user_id = <?=optionalTrim('subpool_ext_user_id', '0')?>; # Optional, reserved for data analysis. It should < 0 (preventing it is no different from single-user mode).
 };

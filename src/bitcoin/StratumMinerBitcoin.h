@@ -63,7 +63,8 @@ private:
       BitcoinNonceType nonce,
       uint32_t nTime,
       uint32_t versionMask,
-      uint64_t submitDiff);
+      uint64_t submitDiff,
+      uint32_t extraGrandNonce1);
 };
 
 #endif // #ifndef STRATUM_MINER_BITCOIN_H_

@@ -33,9 +33,14 @@
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <boost/uuid/uuid_generators.hpp>
+#include <nlohmann/json.hpp>
 
 #include "Zookeeper.h"
 #include "Utils.h"
+#include "Network.h"
+
+using JSON = nlohmann::json;
+using JSONException = nlohmann::detail::exception;
 
 using std::bitset;
 
@@ -220,13 +225,18 @@ ZookeeperUniqIdT<IBITS>::ZookeeperUniqIdT(
   auto uuidGen = boost::uuids::random_generator();
   uuid_ = boost::uuids::to_string(uuidGen());
 
-  data_ = Strings::Format(
-      "{"
-      "\"uuid\":\"%s\","
-      "\"data\":%s"
-      "}",
-      uuid_,
-      userData.empty() ? "null" : userData);
+  JSON json = {
+      {"uuid", uuid_},
+      {"created_at", date("%F %T")},
+      {"host",
+       {
+           {"hostname", IpAddress::getHostName()},
+           {"ip", IpAddress::getInterfaceAddrs()},
+       }},
+      {"data", userData},
+  };
+
+  data_ = json.dump();
 }
 
 template <uint8_t IBITS>
@@ -592,6 +602,10 @@ string Zookeeper::getValue(const string &nodePath, size_t sizeLimit) {
         " failed:" + zerror(stat));
   }
 
+  // size may be -1 if the node has no value
+  if (size < 0) {
+    size = 0;
+  }
   data.resize(size);
   return data;
 }
@@ -612,6 +626,10 @@ bool Zookeeper::getValueW(
     return false;
   }
 
+  // size may be -1 if the node has no value
+  if (size < 0) {
+    size = 0;
+  }
   value.resize(size);
   return true;
 }
@@ -747,6 +765,16 @@ void Zookeeper::createNodesRecursively(const string &nodePath) {
     throw ZookeeperException(
         string("Zookeeper::createNodesRecursively: cannot create node ") +
         nodePath);
+  }
+}
+
+void Zookeeper::setNode(const string &nodePath, const string &value) {
+  int stat = zoo_set(zh_, nodePath.c_str(), value.data(), value.size(), -1);
+
+  if (stat != ZOK) {
+    throw ZookeeperException(
+        string("Zookeeper::setNode: set node ") + nodePath +
+        " failed: " + zerror(stat));
   }
 }
 

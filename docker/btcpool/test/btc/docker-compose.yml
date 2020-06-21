@@ -17,6 +17,9 @@ services:
       context: ../mysql
     environment:
       MYSQL_ROOT_PASSWORD: root
+    command: --max-allowed-packet=67108864
+    ports:
+        - 53306:3306
 
   bitcoind:
     build:
@@ -92,7 +95,19 @@ services:
     volumes:
       - ./cfg:/work/config
     command: /wait-for-it.sh zookeeper:2181 -- /wait-for-it.sh kafka:9092 -- /wait-for-it.sh userlist:80 -- sserver -c /work/config/sserver-mchain.cfg
-
+  
+  sserver-single-user-chain:
+    depends_on:
+      - zookeeper
+      - kafka
+      - userlist
+    image: btccom/btcpool-${TEST_SUITE}
+    ports:
+      - 53337:3333
+    volumes:
+      - ./cfg:/work/config
+    command: /wait-for-it.sh zookeeper:2181 -- /wait-for-it.sh kafka:9092 -- /wait-for-it.sh userlist:80 -- sserver -c /work/config/sserver-single-user-chain.cfg
+  
   blkmaker:
     depends_on:
       - kafka

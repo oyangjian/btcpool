@@ -526,6 +526,9 @@ bool StratumServer::setup(const libconfig::Config &config) {
         << ". This option should not be enabled in a production environment!";
   }
 
+  // grandPool 4+4+8
+  config.lookupValue("sserver.grandPoolEnabled", grandPoolEnabled_);
+
   // ------------------- Diff Controller Options -------------------
 
   string defDiffStr = config.lookup("sserver.default_difficulty");
@@ -729,8 +732,18 @@ bool StratumServer::setup(const libconfig::Config &config) {
   }
 
   // single user mode
+  config.lookupValue("users.single_user_chain", singleUserChain_);
   config.lookupValue("users.single_user_mode", singleUserMode_);
   config.lookupValue("users.single_user_name", singleUserName_);
+  if (singleUserChain_) {
+    LOG(INFO) << "[Option] Single User Chain Enabled, chain switching "
+                 "reference userName: "
+              << singleUserName_;
+    if (singleUserName_.empty()) {
+      LOG(FATAL)
+          << "single_user_name cannot be empty when single_user_chain enabled!";
+    }
+  }
   if (singleUserMode_) {
     string chainPuids = "";
     for (auto chain : chains_) {
@@ -1055,7 +1068,8 @@ void StratumServer::dispatchToShareWorker(std::function<void()> work) {
 size_t StratumServer::switchChain(string userName, size_t newChainId) {
   size_t onlineSessions = 0;
   for (auto &itr : connections_) {
-    if (itr->getUserName() == userName) {
+    if (itr->getState() == StratumSession::AUTHENTICATED &&
+        itr->getUserName() == userName) {
       onlineSessions++;
       if (itr->getChainId() != newChainId) {
         itr->switchChain(newChainId);
@@ -1068,7 +1082,8 @@ size_t StratumServer::switchChain(string userName, size_t newChainId) {
 size_t StratumServer::autoSwitchChain(size_t newChainId) {
   size_t switchedSessions = 0;
   for (auto &itr : connections_) {
-    if (userInfo_->userAutoSwitchChainEnabled(itr->getUserName()) &&
+    if (itr->getState() == StratumSession::AUTHENTICATED &&
+        userInfo_->userAutoSwitchChainEnabled(itr->getUserName()) &&
         itr->getChainId() != newChainId) {
       switchedSessions++;
       itr->switchChain(newChainId);
@@ -1097,6 +1112,20 @@ void StratumServer::sendMiningNotifyToAll(shared_ptr<StratumJobEx> exJobPtr) {
   // of course, for iterators that actually point to the element that is
   // being erased.
   //
+
+  if (grandPoolEnabled_ && exJobPtr->isClean_) {
+    auto itr = connections_.begin();
+    while (itr != connections_.end()) {
+      auto &conn = *itr;
+      if (conn->isGrandPoolClient() && (!conn->isDead())) {
+        if (conn->getChainId() == exJobPtr->chainId_) {
+          conn->sendMiningNotify(exJobPtr);
+        }
+      }
+      ++itr;
+    }
+  }
+
   auto itr = connections_.begin();
   while (itr != connections_.end()) {
     auto &conn = *itr;
@@ -1105,6 +1134,9 @@ void StratumServer::sendMiningNotifyToAll(shared_ptr<StratumJobEx> exJobPtr) {
       sessionIDManager_->freeSessionId(conn->getSessionId());
 #endif
       itr = connections_.erase(itr);
+    } else if (
+        grandPoolEnabled_ && exJobPtr->isClean_ && conn->isGrandPoolClient()) {
+      ++itr;
     } else {
       if (conn->getChainId() == exJobPtr->chainId_) {
         conn->sendMiningNotify(exJobPtr);

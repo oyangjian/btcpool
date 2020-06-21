@@ -37,6 +37,9 @@
 using std::vector;
 using std::shared_ptr;
 
+class SubPoolInfo;
+class JobMaker;
+
 // Consume a kafka message and decide whether to generate a new job.
 // Params:
 //     msg: kafka message.
@@ -72,32 +75,10 @@ struct GwJobMakerDefinition : public JobMakerDefinition {
   uint32_t workLifeTime_;
 };
 
-struct GbtJobMakerDefinition : public JobMakerDefinition {
-  virtual ~GbtJobMakerDefinition() {}
-
-  bool testnet_;
-
-  string payoutAddr_;
-  string coinbaseInfo_;
-  uint32_t blockVersion_;
-
-  string rawGbtTopic_;
-  string auxPowGwTopic_;
-  string rskRawGwTopic_;
-  string vcashRawGwTopic_;
-
-  uint32_t maxJobDelay_;
-  uint32_t gbtLifeTime_;
-  uint32_t emptyGbtLifeTime_;
-
-  uint32_t auxmergedMiningNotifyPolicy_;
-  uint32_t rskmergedMiningNotifyPolicy_;
-  uint32_t vcashmergedMiningNotifyPolicy_;
-};
-
 class JobMakerHandler {
 public:
   virtual ~JobMakerHandler() {}
+  void setParent(shared_ptr<JobMaker> jobmaker);
 
   virtual bool init(shared_ptr<JobMakerDefinition> def) {
     def_ = def;
@@ -122,6 +103,7 @@ public:
   void setServerId(uint8_t id);
 
 protected:
+  shared_ptr<JobMaker> jobmaker_;
   shared_ptr<JobMakerDefinition> def_;
   unique_ptr<IdGenerator> gen_;
 };
@@ -175,9 +157,13 @@ public:
       const string &zookeeperBrokers);
   virtual ~JobMaker();
 
+  void initZk();
   bool init();
   void stop();
   void run();
+
+  inline bool running() { return running_; }
+  inline shared_ptr<Zookeeper> zk() { return zk_; }
 
 private:
   bool setupKafkaProducer();

@@ -122,6 +122,9 @@ void StratumSessionBitcoin::sendMiningNotify(
   notifyStr.append(exJob->miningNotify2_);
 
   string coinbase1 = exJob->coinbase1_;
+  if (isGrandPoolClient_) {
+    coinbase1 = exJob->grandCoinbase1_;
+  }
 
   // coinbase1
   notifyStr.append(coinbase1);
@@ -170,6 +173,19 @@ void StratumSessionBitcoin::handleRequest_AgentGetCapabilities(
       "}}\n",
       idStr);
   sendData(s);
+
+  if (jparams.type() == Utilities::JS::type::Array && jparams.size() >= 1 &&
+      jparams.children()->at(0).type() == Utilities::JS::type::Array) {
+    auto caps = jparams.children()->at(0).array();
+    for (const auto &itr : caps) {
+      if (itr.type() == Utilities::JS::type::Str &&
+          itr.str() == BTCAGENT_PROTOCOL_CAP_SUBRES) {
+        dispatcher_->setSubmitResponse(true);
+        DLOG(INFO) << "worker " << worker_.fullName_
+                   << " enabled BTCAgent submit response";
+      }
+    }
+  }
 }
 
 void StratumSessionBitcoin::handleRequest_MiningConfigure(
@@ -374,7 +390,10 @@ void StratumSessionBitcoin::handleRequest_Subscribe(
       sessionId_,
       sessionId_,
       sessionId_,
-      Strings::Value(getServer().extraNonce2Size()));
+      isGrandPoolClient_ ? Strings::Value(
+                               StratumMiner::kExtraGrandNonce1Size_ +
+                               StratumMiner::kExtraNonce2Size_)
+                         : Strings::Value(getServer().extraNonce2Size()));
 #endif
 
   sendData(s);

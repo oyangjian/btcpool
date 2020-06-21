@@ -151,8 +151,21 @@ void StratumMinerBitcoin::handleRequest_Submit(
   }
 #endif
 
+  uint32_t extraGrandNonce1 = 0;
+  if (getSession().isGrandPoolClient()) {
+    extraGrandNonce1 = jparams.children()->at(0).uint32_hex();
+  }
+
   handleRequest_Submit(
-      idStr, shortJobId, extraNonce1, extraNonce2, nonce, nTime, versionMask, submitDiff);
+      idStr,
+      shortJobId,
+      extraNonce1,
+      extraNonce2,
+      nonce,
+      nTime,
+      versionMask,
+      submitDiff,
+      extraGrandNonce1);
 }
 
 void StratumMinerBitcoin::handleExMessage_SubmitShare(
@@ -205,8 +218,32 @@ void StratumMinerBitcoin::handleExMessage_SubmitShare(
       timestamp,
       versionMask);
 
-  handleRequest_Submit(
-      "null", shortJobId, getSession().getSessionId(), fullExtraNonce2, nonce, timestamp, versionMask, 0);
+  try {
+    auto dispatcher = dynamic_cast<StratumMessageAgentDispatcher *>(
+        &(session_.getDispatcher()));
+
+    handleRequest_Submit(
+        std::to_string(dispatcher->nextSubmitIndex()),
+        shortJobId,
+        getSession().getSessionId(),
+        fullExtraNonce2,
+        nonce,
+        timestamp,
+        versionMask,
+        0,
+        0);
+  } catch (const std::bad_cast &ex) {
+    LOG(WARNING) << Strings::Format(
+        "[agent] submit before authorized, ignore! shortJobId: %02x, "
+        "sessionId: %08x, "
+        "exNonce2: %016x, nonce: %08x, time: %08x, versionMask: %08x",
+        shortJobId,
+        (uint32_t)sessionId,
+        fullExtraNonce2,
+        nonce,
+        timestamp,
+        versionMask);
+  }
 #endif
 }
 
@@ -218,7 +255,8 @@ void StratumMinerBitcoin::handleRequest_Submit(
     BitcoinNonceType nonce,
     uint32_t nTime,
     uint32_t versionMask,
-    uint64_t submitDiff) {
+    uint64_t submitDiff,
+    uint32_t extraGrandNonce1) {
   auto &session = getSession();
   auto &server = session.getServer();
   auto &worker = session.getWorker();
@@ -311,6 +349,8 @@ void StratumMinerBitcoin::handleRequest_Submit(
   if (server.singleUserMode()) {
     share.set_extuserid(share.userid());
     share.set_userid(server.singleUserId(localJob->chainId_));
+  } else if (server.subPoolEnabled()) {
+    share.set_extuserid(server.subPoolExtUserId());
   }
 
   // calc jobTarget
@@ -318,13 +358,14 @@ void StratumMinerBitcoin::handleRequest_Submit(
   BitcoinDifficulty::DiffToTarget(share.sharediff(), jobTarget);
 
 #ifdef CHAIN_TYPE_ZEC
-  LocalShare localShare(
+  LocalShareType localShare(
       nonce.nonce.GetCheapHash(),
       nonceHash,
       nTime,
       djb2(nonce.solution.c_str()));
 #else
-  LocalShare localShare(extraNonce2, nonce, nTime, versionMask);
+  LocalShareType localShare(
+      extraNonce2, nonce, nTime, versionMask, extraGrandNonce1);
 #endif
 
   // can't find local share
@@ -343,6 +384,8 @@ void StratumMinerBitcoin::handleRequest_Submit(
         versionMask,
         jobTarget,
         worker.fullName_,
+        getSession().isGrandPoolClient(),
+        extraGrandNonce1,
         [this,
          alive = std::weak_ptr<bool>{alive_},
          idStr,

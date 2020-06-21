@@ -112,6 +112,18 @@ class UserInfo {
   bool getChainId_ApiSwitch(const string &userName, size_t &chainId);
   bool getChainIdByName_ApiSwitch(const string &chainName, size_t &chainId);
 
+  bool zkGetRawChainW(
+      const string &userName,
+      string &chain,
+      ZookeeperWatcherCallback func,
+      void *data);
+  string zkGetRawChain(const string &userName);
+  bool zkGetChainW(
+      const string &userName,
+      string &chain,
+      ZookeeperWatcherCallback func,
+      void *data);
+  string zkGetChain(const string &userName);
   bool getChainIdFromZookeeper(const string &userName, size_t &chainId);
   void setZkReconnectHandle();
   void handleSwitchChainEvent(const string &userName);
@@ -120,6 +132,7 @@ class UserInfo {
   static void handleAutoRegEvent(
       zhandle_t *zh, int type, int state, const char *path, void *pUserInfo);
   void autoSwitchChain(
+      size_t oldChainId,
       size_t newChainId,
       std::function<
           void(size_t oldChain, size_t newChain, size_t users, size_t miners)>

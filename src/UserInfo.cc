@@ -161,6 +161,37 @@ void UserInfo::regularUserName(string &userName) {
   }
 }
 
+bool UserInfo::zkGetRawChainW(
+    const string &userName,
+    string &chain,
+    ZookeeperWatcherCallback func,
+    void *data) {
+  return zk_->getValueW(zkUserChainMapDir_ + userName, chain, 64, func, data);
+}
+
+string UserInfo::zkGetRawChain(const string &userName) {
+  return zk_->getValue(zkUserChainMapDir_ + userName, 64);
+}
+
+bool UserInfo::zkGetChainW(
+    const string &userName,
+    string &chain,
+    ZookeeperWatcherCallback func,
+    void *data) {
+  if (server_->singleUserChain()) {
+    chain = AUTO_CHAIN_NAME;
+    return true;
+  }
+  return zkGetRawChainW(userName, chain, func, data);
+}
+
+string UserInfo::zkGetChain(const string &userName) {
+  if (server_->singleUserChain()) {
+    return AUTO_CHAIN_NAME;
+  }
+  return zkGetRawChain(userName);
+}
+
 bool UserInfo::getChainIdFromZookeeper(
     const string &userName, size_t &chainId) {
   try {
@@ -171,9 +202,8 @@ bool UserInfo::getChainIdFromZookeeper(
       return false;
     }
 
-    string nodePath = zkUserChainMapDir_ + userName;
     string chainName;
-    if (zk_->getValueW(nodePath, chainName, 64, handleSwitchChainEvent, this)) {
+    if (zkGetChainW(userName, chainName, handleSwitchChainEvent, this)) {
       DLOG(INFO) << "zk userchain map: " << userName << " : " << chainName;
 
       // auto switch chain
@@ -210,15 +240,15 @@ bool UserInfo::getChainIdFromZookeeper(
       // cannot find the chain, warning and ignore it
       LOG(WARNING)
           << "UserInfo::getChainIdFromZookeeper(): Unknown chain name '"
-          << chainName << "' in zookeeper node '" << nodePath << "'.";
+          << chainName << "' in zookeeper node '" << zkUserChainMapDir_
+          << userName << "'.";
     } else {
       LOG(INFO) << "cannot find mining chain in zookeeper, user name: "
-                << userName << " (" << nodePath << ")";
+                << userName << " (" << zkUserChainMapDir_ << userName << ")";
     }
   } catch (const std::exception &ex) {
-    LOG(ERROR)
-        << "UserInfo::getChainIdFromZookeeper(): zk_->getValueW() failed: "
-        << ex.what();
+    LOG(ERROR) << "UserInfo::getChainIdFromZookeeper(): zkGetChainW() failed: "
+               << ex.what();
   } catch (...) {
     LOG(ERROR) << "UserInfo::getChainIdFromZookeeper(): unknown exception";
   }
@@ -239,6 +269,11 @@ void UserInfo::setZkReconnectHandle() {
     // Check the current chain of all users
     for (auto item : nameChains) {
       handleSwitchChainEvent(item.first);
+    }
+
+    if (server_->singleUserChain()) {
+      server_->dispatch(
+          [this]() { server_->management().checkSingleUserChain(); });
     }
   });
 }
@@ -332,20 +367,17 @@ void UserInfo::handleSwitchChainEvent(const string &userName) {
 }
 
 void UserInfo::autoSwitchChain(
+    size_t oldChainId,
     size_t newChainId,
     std::function<
         void(size_t oldChain, size_t newChain, size_t users, size_t miners)>
         callback) {
   // update caches
-  size_t oldChainId = 0;
   size_t users = 0;
   {
     std::unique_lock<std::shared_timed_mutex> l{nameChainlock_};
     for (auto &itr : nameChains_) {
       if (itr.second.autoSwitchChain_) {
-        if (users == 0) {
-          oldChainId = itr.second.chainId_;
-        }
         itr.second.chainId_ = newChainId;
         users++;
       }
@@ -727,15 +759,19 @@ void UserInfo::checkNameChains() {
     nameChainlock_.unlock_shared();
 
     if (nameChains.empty()) {
+      // check single user chain
+      server_->management().checkSingleUserChain();
+
       if (interruptibleSleep(nameChainsCheckIntervalSeconds_))
         return;
+
       continue;
     }
 
     time_t eachUserSleepMillisecond =
         nameChainsCheckIntervalSeconds_ * 1000 / nameChains.size();
-    if (eachUserSleepMillisecond == 0)
-      eachUserSleepMillisecond = 1;
+    if (eachUserSleepMillisecond < 10)
+      eachUserSleepMillisecond = 10;
     LOG(INFO) << "UserInfo::checkNameChains checking, each user sleep "
               << eachUserSleepMillisecond << "ms";
 
@@ -749,8 +785,7 @@ void UserInfo::checkNameChains() {
         const auto &chainInfo = itr.second;
         const string &chainName = server_->chains_[chainInfo.chainId_].name_;
 
-        string nodePath = zkUserChainMapDir_ + userName;
-        string newChainName = zk_->getValue(nodePath, 64);
+        string newChainName = zkGetChain(userName);
 
         if (server_->management().autoSwitchChainEnabled() &&
             newChainName == AUTO_CHAIN_NAME) {
@@ -779,7 +814,7 @@ void UserInfo::checkNameChains() {
         }
 
       } catch (const std::exception &ex) {
-        LOG(ERROR) << "UserInfo::checkNameChains(): zk_->getValue() failed: "
+        LOG(ERROR) << "UserInfo::checkNameChains(): zkGetChain() failed: "
                    << ex.what();
       } catch (...) {
         LOG(ERROR) << "UserInfo::checkNameChains(): unknown exception";
@@ -788,7 +823,18 @@ void UserInfo::checkNameChains() {
       if (eachUserSleepMillisecond > 5000) {
         if (interruptibleSleep(eachUserSleepMillisecond / 1000))
           return;
+
+        // check single user chain
+        server_->management().checkSingleUserChain();
+
+        if (interruptibleSleep(eachUserSleepMillisecond / 1000))
+          return;
       } else {
+        std::this_thread::sleep_for(eachUserSleepMillisecond * 1ms);
+
+        // check single user chain
+        server_->management().checkSingleUserChain();
+
         std::this_thread::sleep_for(eachUserSleepMillisecond * 1ms);
       }
     }

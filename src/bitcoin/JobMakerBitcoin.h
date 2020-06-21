@@ -26,6 +26,7 @@
 
 #include "JobMaker.h"
 
+#include "bitcoin/StratumBitcoin.h"
 #include "rsk/RskWork.h"
 #include "vcash/VcashWork.h"
 
@@ -42,6 +43,34 @@
 #ifdef INCLUDE_BTC_KEY_IO_H
 #include <key_io.h>
 #endif
+
+struct GbtJobMakerDefinition : public JobMakerDefinition {
+  virtual ~GbtJobMakerDefinition() {}
+
+  bool testnet_;
+
+  string payoutAddr_;
+  string coinbaseInfo_;
+  uint32_t blockVersion_;
+
+  string rawGbtTopic_;
+  string auxPowGwTopic_;
+  string rskRawGwTopic_;
+  string vcashRawGwTopic_;
+
+  uint32_t maxJobDelay_;
+  uint32_t gbtLifeTime_;
+  uint32_t emptyGbtLifeTime_;
+
+  uint32_t auxmergedMiningNotifyPolicy_;
+  uint32_t rskmergedMiningNotifyPolicy_;
+  uint32_t vcashmergedMiningNotifyPolicy_;
+
+  vector<SubPoolInfo> subPool_;
+  int subPoolCoinbaseMaxLen_ = 30;
+
+  bool grandPoolEnabled_;
+};
 
 class JobMakerHandlerBitcoin : public JobMakerHandler {
   // mining bitcoin blocks
@@ -68,6 +97,10 @@ class JobMakerHandlerBitcoin : public JobMakerHandler {
   VcashWork *currentVcashWork_;
   // bool isVcashMergedMiningUpdate_; // a flag to mark Vcash has an update
 
+  const size_t SUBPOOL_JSON_MAX_SIZE = 8192;
+  std::mutex subPoolLock_;
+  std::thread updateSubPoolAddrThread_;
+
   bool addRawGbt(const string &msg);
   void clearTimeoutGbt();
   bool isReachTimeout();
@@ -88,6 +121,12 @@ class JobMakerHandlerBitcoin : public JobMakerHandler {
   inline uint32_t gbtKeyGetHeight(uint64_t gbtKey);
   inline bool gbtKeyIsEmptyBlock(uint64_t gbtKey);
 
+  bool updateSubPoolAddr(size_t index);
+  void checkSubPoolAddr();
+  void watchSubPoolAddr(const string &path);
+  static void handleSubPoolUpdateEvent(
+      zhandle_t *zh, int type, int state, const char *path, void *pThis);
+
 public:
   JobMakerHandlerBitcoin();
   virtual ~JobMakerHandlerBitcoin() {}
@@ -107,6 +146,10 @@ public:
   // read-only definition
   inline shared_ptr<const GbtJobMakerDefinition> def() {
     return std::dynamic_pointer_cast<const GbtJobMakerDefinition>(def_);
+  }
+
+  inline shared_ptr<GbtJobMakerDefinition> defWithoutConst() {
+    return std::dynamic_pointer_cast<GbtJobMakerDefinition>(def_);
   }
 };
 

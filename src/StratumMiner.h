@@ -50,6 +50,7 @@ protected:
 
 public:
   static const size_t kExtraNonce1Size_ = 4;
+  static const size_t kExtraGrandNonce1Size_ = 4;
   static const size_t kExtraNonce2Size_ = 8;
 
   virtual ~StratumMiner() = default;
@@ -95,6 +96,9 @@ template <typename StratumTraits>
 class StratumMinerBase : public StratumMiner {
   using SessionType = typename StratumTraits::SessionType;
   using JobDiffType = typename StratumTraits::JobDiffType;
+
+public:
+  using LocalShareType = typename StratumTraits::LocalShareType;
 
 protected:
   StratumMinerBase(

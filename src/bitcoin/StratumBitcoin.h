@@ -35,6 +35,7 @@
 #endif
 
 #include <uint256.h>
+#include <pubkey.h>
 #include <primitives/block.h>
 
 #include "rsk/RskWork.h"
@@ -310,7 +311,6 @@ public:
       set_blkbits(share->blkBits_);
 
       // There is no height in ShareBitcoinBytesV1, so it can only be assumed.
-      // Note: BTCPool's SBTC support is outdated, so SBTC is not considered.
 
 #ifdef CHAIN_TYPE_UBTC
       // UBTC's height and block rewards differ greatly from other SHA256
@@ -334,6 +334,22 @@ public:
   const static uint32_t CURRENT_VERSION = 0x00010004u;
 };
 
+class SubPoolInfo {
+public:
+  string name_;
+  string zkUpdatePath_;
+  string coinbaseInfo_;
+  CTxDestination payoutAddr_;
+};
+
+class SubPoolJobBitcoin {
+public:
+  string name_;
+  string coinbase1_;
+  string coinbase2_;
+  string grandCoinbase1_;
+};
+
 class StratumJobBitcoin : public StratumJob {
 public:
   string gbtHash_; // gbt hash id
@@ -341,8 +357,11 @@ public:
   string prevHashBeStr_; // little-endian hex, memory's order
   int32_t height_ = 0;
   string coinbase1_; // bitcoin: coinbase1, zcash: full coinbase tx
+  string grandCoinbase1_;
   string coinbase2_; // bitcoin: coinbase2, zcash: empty
   vector<uint256> merkleBranch_;
+
+  map<string, SubPoolJobBitcoin> subPool_;
 
   int32_t nVersion_ = 0;
   uint32_t nBits_ = 0;
@@ -400,11 +419,13 @@ public:
       const char *gbt,
       const string &poolCoinbaseInfo,
       const CTxDestination &poolPayoutAddr,
+      const vector<SubPoolInfo> &subPool,
       const uint32_t blockVersion,
       const string &nmcAuxBlockJson,
       const RskWork &latestRskBlockJson,
       const VcashWork &latestVcashBlockJson,
-      const bool isMergedMiningUpdate);
+      const bool isMergedMiningUpdate,
+      const bool grandPoolEnabled);
   bool initFromStratumJob(
       vector<JsonNode> &jparamsArr,
       uint64_t currentDifficulty,
@@ -416,6 +437,85 @@ public:
   uint64_t height() const override { return height_; }
 };
 
+struct LocalShareBitcoin {
+  uint64_t exNonce2_; // extra nonce2 fixed 8 bytes
+  uint32_t nonce_; // nonce in block header
+  uint32_t time_; // nTime in block header
+  uint32_t versionMask_; // block version mask
+
+  LocalShareBitcoin(
+      uint64_t exNonce2, uint32_t nonce, uint32_t time, uint32_t versionMask)
+    : exNonce2_(exNonce2)
+    , nonce_(nonce)
+    , time_(time)
+    , versionMask_(versionMask) {}
+
+  LocalShareBitcoin(uint64_t exNonce2, uint32_t nonce, uint32_t time)
+    : exNonce2_(exNonce2)
+    , nonce_(nonce)
+    , time_(time)
+    , versionMask_(0) {}
+
+  LocalShareBitcoin &operator=(const LocalShareBitcoin &other) {
+    exNonce2_ = other.exNonce2_;
+    nonce_ = other.nonce_;
+    time_ = other.time_;
+    versionMask_ = other.versionMask_;
+    return *this;
+  }
+
+  bool operator<(const LocalShareBitcoin &r) const {
+    if (exNonce2_ < r.exNonce2_ ||
+        (exNonce2_ == r.exNonce2_ && nonce_ < r.nonce_) ||
+        (exNonce2_ == r.exNonce2_ && nonce_ == r.nonce_ && time_ < r.time_) ||
+        (exNonce2_ == r.exNonce2_ && nonce_ == r.nonce_ && time_ == r.time_ &&
+         versionMask_ < r.versionMask_)) {
+      return true;
+    }
+    return false;
+  }
+};
+
+struct LocalShareBitcoinGrand : public LocalShareBitcoin {
+  uint32_t exGrandNonce1_; // extra grand nonce1 fixed 4bytes
+
+  LocalShareBitcoinGrand(
+      uint64_t exNonce2,
+      uint32_t nonce,
+      uint32_t time,
+      uint32_t versionMask,
+      uint32_t exGrandNonce1)
+    : LocalShareBitcoin(exNonce2, nonce, time, versionMask)
+    , exGrandNonce1_(exGrandNonce1) {}
+
+  LocalShareBitcoinGrand(
+      uint64_t exNonce2, uint32_t nonce, uint32_t time, uint32_t versionMask)
+    : LocalShareBitcoin(exNonce2, nonce, time, versionMask)
+    , exGrandNonce1_(0) {}
+
+  LocalShareBitcoinGrand &operator=(const LocalShareBitcoinGrand &other) {
+    exNonce2_ = other.exNonce2_;
+    nonce_ = other.nonce_;
+    time_ = other.time_;
+    versionMask_ = other.versionMask_;
+    exGrandNonce1_ = other.exGrandNonce1_;
+    return *this;
+  }
+
+  bool operator<(const LocalShareBitcoinGrand &r) const {
+    if (exNonce2_ < r.exNonce2_ ||
+        (exNonce2_ == r.exNonce2_ && nonce_ < r.nonce_) ||
+        (exNonce2_ == r.exNonce2_ && nonce_ == r.nonce_ && time_ < r.time_) ||
+        (exNonce2_ == r.exNonce2_ && nonce_ == r.nonce_ && time_ == r.time_ &&
+         versionMask_ < r.versionMask_) ||
+        (exNonce2_ == r.exNonce2_ && nonce_ == r.nonce_ && time_ == r.time_ &&
+         versionMask_ == r.versionMask_ && exGrandNonce1_ < r.exGrandNonce1_)) {
+      return true;
+    }
+    return false;
+  }
+};
+
 class ServerBitcoin;
 class StratumSessionBitcoin;
 
@@ -423,10 +523,13 @@ struct StratumTraitsBitcoin {
   using ServerType = ServerBitcoin;
   using SessionType = StratumSessionBitcoin;
   using JobDiffType = uint64_t;
-  struct LocalJobType : public LocalJob {
+
+  using LocalShareType = LocalShareBitcoinGrand;
+
+  struct LocalJobType : public LocalJobBase<LocalShareType> {
     LocalJobType(
         size_t chainId, uint64_t jobId, uint8_t shortJobId, uint32_t blkBits)
-      : LocalJob(chainId, jobId)
+      : LocalJobBase<LocalShareType>(chainId, jobId)
       , shortJobId_(shortJobId)
       , blkBits_(blkBits) {}
     bool operator==(uint8_t shortJobId) const {

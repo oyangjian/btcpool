@@ -64,6 +64,19 @@ void JobRepositoryBitcoin::broadcastStratumJob(
     return;
   }
 
+  if (GetServer()->subPoolEnabled()) {
+    auto itr = sjob->subPool_.find(GetServer()->subPoolName());
+    if (itr != sjob->subPool_.end()) {
+      sjob->coinbase1_ = itr->second.coinbase1_;
+      sjob->coinbase2_ = itr->second.coinbase2_;
+      sjob->grandCoinbase1_ = itr->second.grandCoinbase1_;
+    } else {
+      LOG(ERROR) << "CANNOT FIND COINBASE TX OF SUBPOOL "
+                 << GetServer()->subPoolName()
+                 << "! The main pool coinbase tx is used.";
+    }
+  }
+
   bool isClean = false;
   uint32_t height = sjob->height_;
   if (height > lastHeight_) {
@@ -213,6 +226,7 @@ void StratumJobExBitcoin::init(uint32_t extraNonce2Size) {
   miningNotify2_ = Strings::Format("\",\"%s\",\"", sjob->prevHashBeStr_);
 
   coinbase1_ = sjob->coinbase1_.c_str();
+  grandCoinbase1_ = sjob->grandCoinbase1_.c_str();
 
   ssize_t jobExtraNonce2Size = StratumMiner::kExtraNonce2Size_;
   if (sjob->proxyExtraNonce2Size_ > 0) {
@@ -263,12 +277,18 @@ void StratumJobExBitcoin::generateCoinbaseTx(
     std::vector<char> *coinbaseBin,
     const uint32_t extraNonce1,
     const string &extraNonce2Hex,
-    string *userCoinbaseInfo) {
+    const bool isGrandPoolClient,
+    const uint32_t extraGrandNonce1) {
   string coinbaseHex;
-  const string extraNonceStr =
-      Strings::Format("%08x%s", extraNonce1, extraNonce2Hex);
+  string extraNonceStr = Strings::Format("%08x%s", extraNonce1, extraNonce2Hex);
   auto sjob = std::static_pointer_cast<StratumJobBitcoin>(sjob_);
   string coinbase1 = sjob->coinbase1_;
+
+  if (isGrandPoolClient) {
+    coinbase1 = sjob->grandCoinbase1_;
+    extraNonceStr = Strings::Format(
+        "%08x%08x%s", extraNonce1, extraGrandNonce1, extraNonce2Hex);
+  }
 
   coinbaseHex.append(coinbase1);
   coinbaseHex.append(extraNonceStr);
@@ -290,7 +310,8 @@ void StratumJobExBitcoin::generateBlockHeader(
     const uint32_t nTime,
     const BitcoinNonceType nonce,
     const uint32_t versionMask,
-    string *userCoinbaseInfo) {
+    const bool isGrandPoolClient,
+    const uint32_t extraGrandNonce1) {
 
   header->hashPrevBlock = hashPrevBlock;
   header->nVersion = (nVersion ^ versionMask);
@@ -314,7 +335,11 @@ void StratumJobExBitcoin::generateBlockHeader(
 
   // compute merkle root
   generateCoinbaseTx(
-      coinbaseBin, extraNonce1, extraNonce2Hex, userCoinbaseInfo);
+      coinbaseBin,
+      extraNonce1,
+      extraNonce2Hex,
+      isGrandPoolClient,
+      extraGrandNonce1);
   header->hashMerkleRoot =
       ComputeCoinbaseMerkleRoot(*coinbaseBin, merkleBranch);
 #endif
@@ -333,6 +358,17 @@ ServerBitcoin::~ServerBitcoin() {
 }
 
 bool ServerBitcoin::setupInternal(const libconfig::Config &config) {
+  config.lookupValue("subpool.enabled", subPoolEnabled_);
+  config.lookupValue("subpool.name", subPoolName_);
+  config.lookupValue("subpool.ext_user_id", subPoolExtUserId_);
+  if (subPoolEnabled_) {
+    LOG(WARNING) << "[Option] "
+                 << "Subpool " << subPoolName_ << " enabled";
+  }
+  if (subPoolExtUserId_ > 0) {
+    LOG(FATAL) << "[Option] subpool.ext_user_id cannot > 0";
+  }
+
   config.lookupValue("sserver.use_share_v1", useShareV1_);
 
   config.lookupValue("sserver.version_mask", versionMask_);
@@ -471,8 +507,9 @@ void ServerBitcoin::checkShare(
     const uint32_t versionMask,
     const uint256 &jobTarget,
     const string &workFullName,
-    std::function<void(int32_t status, uint32_t bitsReached)> returnFn,
-    string *userCoinbaseInfo) {
+    const bool isGrandPoolClient,
+    const uint32_t extraGrandNonce1,
+    std::function<void(int32_t status, uint32_t bitsReached)> returnFn) {
 
   auto exJobPtr = std::static_pointer_cast<StratumJobExBitcoin>(
       GetJobRepository(chainId)->getStratumJobEx(share.jobid()));
@@ -516,7 +553,8 @@ void ServerBitcoin::checkShare(
       nTime,
       nonce,
       versionMask,
-      userCoinbaseInfo);
+      isGrandPoolClient,
+      extraGrandNonce1);
 
   dispatchToShareWorker([this,
                          chainId,
@@ -589,7 +627,8 @@ void ServerBitcoin::checkShare(
       sendSolvedShare2Kafka(chainId, &foundBlock, coinbaseBin);
 
       if (sjob->proxyJobDifficulty_ > 0) {
-        LOG(INFO) << ">>>> solution found: " << blkHash.ToString()
+        LOG(INFO) << ">>>> [" << chainName(chainId)
+                  << "] solution found: " << blkHash.ToString()
                   << ", jobId: " << share.jobid()
                   << ", userId: " << share.userid() << ", by: " << workFullName
                   << " <<<<";
@@ -599,7 +638,8 @@ void ServerBitcoin::checkShare(
           GetJobRepository(chainId)->markAllJobsAsStale(height);
         });
 
-        LOG(INFO) << ">>>> found a new block: " << blkHash.ToString()
+        LOG(INFO) << ">>>> [" << chainName(chainId)
+                  << "] found a new block: " << blkHash.ToString()
                   << ", jobId: " << share.jobid()
                   << ", userId: " << share.userid() << ", by: " << workFullName
                   << " <<<<";
